@@ -301,6 +301,42 @@ create(char *path, short type, short major, short minor)
   return 0;
 }
 
+// Create a symbolic link from path to target
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+  int len;
+
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+  
+  // Create a new inode with type T_SYMLINK
+  if((ip = create(path, T_SYMLINK, 0, 0)) == 0){
+    end_op();
+    return -1;
+  }
+
+  // Calculate length of target including null terminator
+  for(len = 0; len < MAXPATH && target[len]; len++)
+    ;
+  len++; // include null terminator
+  
+  // Write the target path to the inode's data blocks
+  if(writei(ip, 0, (uint64)target, 0, len) != len){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
+  return 0;
+}
+
 uint64
 sys_open(void)
 {
@@ -328,6 +364,38 @@ sys_open(void)
       return -1;
     }
     ilock(ip);
+    
+    // Follow symbolic links unless O_NOFOLLOW is set
+    if(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
+      // Follow the symlink chain with a depth limit
+      int depth = 0;
+      while(ip->type == T_SYMLINK && depth < 10){
+        char target[MAXPATH];
+        int len = readi(ip, 0, (uint64)target, 0, MAXPATH - 1);
+        if(len <= 0){
+          iunlockput(ip);
+          end_op();
+          return -1;
+        }
+        target[len] = 0; // Ensure null termination just in case
+        iunlockput(ip);
+        
+        if((ip = namei(target)) == 0){
+          end_op();
+          return -1;
+        }
+        ilock(ip);
+        depth++;
+      }
+      
+      // Check if we hit the depth limit (cycle detection)
+      if(depth >= 10){
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+    }
+    
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();

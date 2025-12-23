@@ -118,7 +118,7 @@ def run_tests():
     parser.add_option("-v", "--verbose", action="store_true",
                       help="print commands")
     parser.add_option("--color", choices=["never", "always", "auto"],
-                      default="auto", help="never, always, or auto")
+                      default="always", help="never, always, or auto")
     parser.add_option("--results", help="results file path")
     (options, args) = parser.parse_args()
 
@@ -238,7 +238,7 @@ def make(*target):
     post_make()
 
 def show_command(cmd):
-    from pipes import quote
+    from shlex import quote
     print("\n$", " ".join(map(quote, cmd)))
 
 def maybe_unlink(*paths):
