@@ -301,32 +301,34 @@ create(char *path, short type, short major, short minor)
   return 0;
 }
 
-// Create a symbolic link from path to target
+// Tạo symbolic link (liên kết mềm) từ path trỏ đến target
+// Symlink cho phép tham chiếu đến file qua đường dẫn, không giới hạn cùng device
 uint64
 sys_symlink(void)
 {
   char target[MAXPATH], path[MAXPATH];
   struct inode *ip;
-  int len;
 
+  // Lấy tham số: target là đường dẫn đích, path là vị trí tạo link
   if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
     return -1;
 
   begin_op();
   
-  // Create a new inode with type T_SYMLINK
-  if((ip = create(path, T_SYMLINK, 0, 0)) == 0){
+  // Tạo inode mới với type T_SYMLINK
+  ip = create(path, T_SYMLINK, 0, 0);
+  if(ip == 0){
     end_op();
     return -1;
   }
 
-  // Calculate length of target including null terminator
-  for(len = 0; len < MAXPATH && target[len]; len++)
-    ;
-  len++; // include null terminator
+  // Tính độ dài target bao gồm null terminator
+  // Sử dụng strlen() thay vì viết for loop thủ công
+  int target_len = strlen(target) + 1;  // +1 cho ký tự null
   
-  // Write the target path to the inode's data blocks
-  if(writei(ip, 0, (uint64)target, 0, len) != len){
+  // Ghi đường dẫn target vào data blocks của symlink inode
+  // Lưu ý: target không cần tồn tại tại thời điểm tạo symlink
+  if(writei(ip, 0, (uint64)target, 0, target_len) != target_len){
     iunlockput(ip);
     end_op();
     return -1;
@@ -336,6 +338,9 @@ sys_symlink(void)
   end_op();
   return 0;
 }
+
+// Giới hạn độ sâu theo dõi symlink để phát hiện vòng lặp (cycle)
+#define SYMLINK_MAX_DEPTH 10
 
 uint64
 sys_open(void)
@@ -365,37 +370,46 @@ sys_open(void)
     }
     ilock(ip);
     
-    // Follow symbolic links unless O_NOFOLLOW is set
+    // Xử lý symbolic links: tự động follow trừ khi có flag O_NOFOLLOW
+    // Đảm bảo không bị vòng lặp vô hạn bằng cách giới hạn độ sâu
     if(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
-      // Follow the symlink chain with a depth limit
-      int depth = 0;
-      while(ip->type == T_SYMLINK && depth < 10){
-        char target[MAXPATH];
-        int len = readi(ip, 0, (uint64)target, 0, MAXPATH - 1);
-        if(len <= 0){
+      char symlink_target[MAXPATH];
+      
+      // Dùng for loop với đếm số lần follow để phát hiện cycle
+      for(int follow_count = 0; follow_count < SYMLINK_MAX_DEPTH; follow_count++){
+        // Kiểm tra nếu không phải symlink thì dừng
+        if(ip->type != T_SYMLINK)
+          break;
+          
+        // Đọc đường dẫn target từ data blocks của symlink
+        int bytes_read = readi(ip, 0, (uint64)symlink_target, 0, MAXPATH - 1);
+        if(bytes_read <= 0){
           iunlockput(ip);
           end_op();
           return -1;
         }
-        target[len] = 0; // Ensure null termination just in case
+        symlink_target[bytes_read] = '\0';  // Đảm bảo null-terminated
         iunlockput(ip);
         
-        if((ip = namei(target)) == 0){
+        // Resolve đường dẫn target để lấy inode tiếp theo
+        ip = namei(symlink_target);
+        if(ip == 0){
           end_op();
           return -1;
         }
         ilock(ip);
-        depth++;
       }
       
-      // Check if we hit the depth limit (cycle detection)
-      if(depth >= 10){
+      // Nếu đã follow hết SYMLINK_MAX_DEPTH lần mà vẫn là symlink
+      // thì có thể là vòng lặp, trả về lỗi
+      if(ip->type == T_SYMLINK){
         iunlockput(ip);
         end_op();
         return -1;
       }
     }
     
+    // Không cho phép mở directory với chế độ ghi
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();

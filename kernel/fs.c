@@ -371,144 +371,172 @@ iunlockput(struct inode *ip)
 
 // Inode content
 //
-// The content (data) associated with each inode is stored
-// in blocks on the disk. The first NDIRECT block numbers
-// are listed in ip->addrs[].  The next NINDIRECT blocks are
-// listed in block ip->addrs[NDIRECT].
-// The doubly-indirect block is at ip->addrs[NDIRECT+1].
+// Nội dung (data) của mỗi inode được lưu trong các blocks trên disk.
+// - NDIRECT block numbers đầu tiên nằm trong ip->addrs[]
+// - NINDIRECT blocks tiếp theo nằm trong block ip->addrs[NDIRECT] (singly-indirect)
+// - Doubly-indirect block nằm tại ip->addrs[NDIRECT+1]
+//
+// Cấu trúc địa chỉ:
+// addrs[0..10]  -> 11 direct blocks
+// addrs[11]     -> 1 singly-indirect block (256 blocks)
+// addrs[12]     -> 1 doubly-indirect block (256 * 256 = 65536 blocks)
+// Tổng: 11 + 256 + 65536 = 65803 blocks
 
-// Return the disk block address of the nth block in inode ip.
-// If there is no such block, bmap allocates one.
-// returns 0 if out of disk space.
+// Trả về địa chỉ block thứ bn trong inode ip.
+// Nếu block chưa tồn tại, bmap sẽ allocate block mới.
+// Trả về 0 nếu hết dung lượng disk.
 static uint
 bmap(struct inode *ip, uint bn)
 {
-  uint addr, *a;
-  struct buf *bp;
+  uint block_addr;
+  uint *addr_array;
+  struct buf *buf_ptr;
 
+  // Xử lý direct blocks (0 đến NDIRECT-1)
   if(bn < NDIRECT){
-    if((addr = ip->addrs[bn]) == 0){
-      addr = balloc(ip->dev);
-      if(addr == 0)
+    if((block_addr = ip->addrs[bn]) == 0){
+      block_addr = balloc(ip->dev);
+      if(block_addr == 0)
         return 0;
-      ip->addrs[bn] = addr;
+      ip->addrs[bn] = block_addr;
     }
-    return addr;
+    return block_addr;
   }
   bn -= NDIRECT;
 
+  // Xử lý singly-indirect blocks (NDIRECT đến NDIRECT + NINDIRECT - 1)
   if(bn < NINDIRECT){
-    // Load indirect block, allocating if necessary.
-    if((addr = ip->addrs[NDIRECT]) == 0){
-      addr = balloc(ip->dev);
-      if(addr == 0)
+    // Load singly-indirect block, allocate nếu chưa có
+    if((block_addr = ip->addrs[NDIRECT]) == 0){
+      block_addr = balloc(ip->dev);
+      if(block_addr == 0)
         return 0;
-      ip->addrs[NDIRECT] = addr;
+      ip->addrs[NDIRECT] = block_addr;
     }
-    bp = bread(ip->dev, addr);
-    a = (uint*)bp->data;
-    if((addr = a[bn]) == 0){
-      addr = balloc(ip->dev);
-      if(addr){
-        a[bn] = addr;
-        log_write(bp);
+    buf_ptr = bread(ip->dev, block_addr);
+    addr_array = (uint*)buf_ptr->data;
+    if((block_addr = addr_array[bn]) == 0){
+      block_addr = balloc(ip->dev);
+      if(block_addr){
+        addr_array[bn] = block_addr;
+        log_write(buf_ptr);
       }
     }
-    brelse(bp);
-    return addr;
+    brelse(buf_ptr);
+    return block_addr;
   }
   bn -= NINDIRECT;
 
+  // Xử lý doubly-indirect blocks
+  // Đây là phần mở rộng để hỗ trợ file lớn (65803 blocks)
   if(bn < NINDIRECT * NINDIRECT){
-    // Load doubly-indirect block, allocating if necessary.
-    if((addr = ip->addrs[NDIRECT+1]) == 0){
-      addr = balloc(ip->dev);
-      if(addr == 0)
-        return 0;
-      ip->addrs[NDIRECT+1] = addr;
-    }
-    bp = bread(ip->dev, addr);
-    a = (uint*)bp->data;
+    // Tính toán chỉ số 2 cấp
+    uint outer_idx = bn / NINDIRECT;  // Chỉ số trong doubly-indirect block
+    uint inner_idx = bn % NINDIRECT;  // Chỉ số trong singly-indirect block
     
-    // Get the singly-indirect block index
-    uint idx1 = bn / NINDIRECT;
-    if((addr = a[idx1]) == 0){
-      addr = balloc(ip->dev);
-      if(addr == 0){
-        brelse(bp);
+    // Bước 1: Load doubly-indirect block
+    if((block_addr = ip->addrs[NDIRECT+1]) == 0){
+      block_addr = balloc(ip->dev);
+      if(block_addr == 0)
+        return 0;
+      ip->addrs[NDIRECT+1] = block_addr;
+    }
+    
+    struct buf *dbl_buf = bread(ip->dev, block_addr);
+    uint *dbl_addrs = (uint*)dbl_buf->data;
+    
+    // Bước 2: Lấy địa chỉ của singly-indirect block tại vị trí outer_idx
+    uint sgl_block_addr = dbl_addrs[outer_idx];
+    if(sgl_block_addr == 0){
+      sgl_block_addr = balloc(ip->dev);
+      if(sgl_block_addr == 0){
+        brelse(dbl_buf);
         return 0;
       }
-      a[idx1] = addr;
-      log_write(bp);
+      dbl_addrs[outer_idx] = sgl_block_addr;
+      log_write(dbl_buf);
     }
-    brelse(bp);
+    brelse(dbl_buf);
     
-    // Load the singly-indirect block
-    bp = bread(ip->dev, addr);
-    a = (uint*)bp->data;
-    uint idx2 = bn % NINDIRECT;
-    if((addr = a[idx2]) == 0){
-      addr = balloc(ip->dev);
-      if(addr){
-        a[idx2] = addr;
-        log_write(bp);
+    // Bước 3: Load singly-indirect block và lấy địa chỉ data block
+    struct buf *sgl_buf = bread(ip->dev, sgl_block_addr);
+    uint *sgl_addrs = (uint*)sgl_buf->data;
+    
+    block_addr = sgl_addrs[inner_idx];
+    if(block_addr == 0){
+      block_addr = balloc(ip->dev);
+      if(block_addr){
+        sgl_addrs[inner_idx] = block_addr;
+        log_write(sgl_buf);
       }
     }
-    brelse(bp);
-    return addr;
+    brelse(sgl_buf);
+    return block_addr;
   }
 
   panic("bmap: out of range");
 }
 
-// Truncate inode (discard contents).
-// Caller must hold ip->lock.
+// Truncate inode - Xóa toàn bộ nội dung của inode và giải phóng các blocks.
+// Caller phải giữ ip->lock trước khi gọi hàm này.
 void
 itrunc(struct inode *ip)
 {
-  int i, j;
-  struct buf *bp;
-  uint *a;
+  int block_idx;
+  struct buf *buf_ptr;
+  uint *addr_array;
 
-  for(i = 0; i < NDIRECT; i++){
-    if(ip->addrs[i]){
-      bfree(ip->dev, ip->addrs[i]);
-      ip->addrs[i] = 0;
+  // Bước 1: Giải phóng tất cả direct blocks
+  for(block_idx = 0; block_idx < NDIRECT; block_idx++){
+    if(ip->addrs[block_idx]){
+      bfree(ip->dev, ip->addrs[block_idx]);
+      ip->addrs[block_idx] = 0;
     }
   }
 
+  // Bước 2: Giải phóng singly-indirect block và các data blocks bên trong
   if(ip->addrs[NDIRECT]){
-    bp = bread(ip->dev, ip->addrs[NDIRECT]);
-    a = (uint*)bp->data;
-    for(j = 0; j < NINDIRECT; j++){
-      if(a[j])
-        bfree(ip->dev, a[j]);
+    buf_ptr = bread(ip->dev, ip->addrs[NDIRECT]);
+    addr_array = (uint*)buf_ptr->data;
+    
+    // Giải phóng từng data block được trỏ bởi singly-indirect
+    for(int sgl_idx = 0; sgl_idx < NINDIRECT; sgl_idx++){
+      if(addr_array[sgl_idx])
+        bfree(ip->dev, addr_array[sgl_idx]);
     }
-    brelse(bp);
+    brelse(buf_ptr);
+    
+    // Giải phóng chính singly-indirect block
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
   }
 
+  // Bước 3: Giải phóng doubly-indirect block và tất cả blocks bên trong
   if(ip->addrs[NDIRECT+1]){
-    // Free doubly-indirect block
-    struct buf *bp2;
-    uint *a2;
-    bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
-    a = (uint*)bp->data;
-    for(j = 0; j < NINDIRECT; j++){
-      if(a[j]){
-        // Free each singly-indirect block
-        bp2 = bread(ip->dev, a[j]);
-        a2 = (uint*)bp2->data;
-        for(int k = 0; k < NINDIRECT; k++){
-          if(a2[k])
-            bfree(ip->dev, a2[k]);
+    struct buf *dbl_buf = bread(ip->dev, ip->addrs[NDIRECT+1]);
+    uint *dbl_addrs = (uint*)dbl_buf->data;
+    
+    // Duyệt qua mỗi entry trong doubly-indirect block
+    for(int outer_idx = 0; outer_idx < NINDIRECT; outer_idx++){
+      if(dbl_addrs[outer_idx]){
+        // Đọc singly-indirect block tại vị trí outer_idx
+        struct buf *sgl_buf = bread(ip->dev, dbl_addrs[outer_idx]);
+        uint *sgl_addrs = (uint*)sgl_buf->data;
+        
+        // Giải phóng tất cả data blocks trong singly-indirect block này
+        for(int inner_idx = 0; inner_idx < NINDIRECT; inner_idx++){
+          if(sgl_addrs[inner_idx])
+            bfree(ip->dev, sgl_addrs[inner_idx]);
         }
-        brelse(bp2);
-        bfree(ip->dev, a[j]);
+        brelse(sgl_buf);
+        
+        // Giải phóng singly-indirect block
+        bfree(ip->dev, dbl_addrs[outer_idx]);
       }
     }
-    brelse(bp);
+    brelse(dbl_buf);
+    
+    // Giải phóng chính doubly-indirect block
     bfree(ip->dev, ip->addrs[NDIRECT+1]);
     ip->addrs[NDIRECT+1] = 0;
   }

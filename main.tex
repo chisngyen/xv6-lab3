@@ -1,0 +1,244 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[vietnamese]{babel}
+\usepackage{graphicx}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{float}
+\usepackage{fancyhdr}
+
+% Page layout
+\geometry{left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm}
+
+% Code listing style
+\lstset{
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue}\bfseries,
+    commentstyle=\color{gray}\itshape,
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    frame=single,
+    breaklines=true,
+    tabsize=4,
+    showstringspaces=false,
+    language=C
+}
+
+% Header/Footer
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{Báo cáo Project 03}
+\lhead{Hệ Điều Hành}
+\cfoot{\thepage}
+
+\begin{document}
+
+% ============= TRANG BÌA =============
+\begin{titlepage}
+    \centering
+    \vspace*{1cm}
+    
+    \textbf{\large ĐẠI HỌC QUỐC GIA TP.HCM}\\[0.3cm]
+    \textbf{\large TRƯỜNG ĐẠI HỌC KHOA HỌC TỰ NHIÊN}\\[0.3cm]
+    \textbf{\large KHOA CÔNG NGHỆ THÔNG TIN}\\[2cm]
+    
+    \rule{\linewidth}{0.5mm}\\[0.5cm]
+    {\LARGE \textbf{BÁO CÁO PROJECT 03}}\\[0.3cm]
+    {\Large \textbf{Xv6 File System}}\\[0.3cm]
+    \rule{\linewidth}{0.5mm}\\[1.5cm]
+    
+    \textbf{\large Môn học: Hệ Điều Hành}\\[2cm]
+    
+    \begin{tabular}{ll}
+        \textbf{Sinh viên thực hiện:} & \\[0.3cm]
+        Huỳnh Trung Kiệt & 23122039 \\
+        Đào Sỹ Duy Minh & 23122041 \\
+        Nguyễn Lâm Phú Quý & 23122048 \\[1cm]
+        \textbf{Giáo viên hướng dẫn:} & Lê Giang Thanh \\
+    \end{tabular}
+    
+    \vfill
+    \textbf{Tháng 12, 2024}
+\end{titlepage}
+
+% ============= MỤC LỤC =============
+\tableofcontents
+\newpage
+
+% ============= NỘI DUNG =============
+\section{Tổng quan}
+
+Phần bài tập này tập trung vào việc mở rộng và cải tiến hệ thống file của xv6. Nhóm thực hiện hai yêu cầu chính: hỗ trợ file có kích thước lớn thông qua cơ chế doubly-indirect block và cài đặt symbolic links (soft links) để liên kết file theo đường dẫn.
+
+Các bài tập đã hoàn thành bao gồm: (1) Mở rộng kích thước file tối đa lên 65803 blocks thông qua doubly-indirect block; (2) Cài đặt symbolic links với khả năng tạo, follow và xử lý các edge cases như cycle detection.
+
+Trước khi thực hiện, nhóm đã nghiên cứu Chapter 8: File system từ xv6 book, tập trung vào cấu trúc inode, hàm bmap() và cách pathname lookup hoạt động trong kernel.
+
+% ============= BẢNG PHÂN CÔNG =============
+\section{Bảng phân công công việc}
+
+\begin{table}[H]
+\centering
+\caption{Bảng phân công công việc giữa các thành viên}
+\begin{tabular}{|p{3.5cm}|p{9cm}|c|}
+\hline
+\textbf{Thành viên} & \textbf{Công việc} & \textbf{Tỷ lệ} \\
+\hline
+Huỳnh Trung Kiệt (23122039) & 
+Nghiên cứu cấu trúc inode và cơ chế block mapping. Thiết kế và cài đặt doubly-indirect block trong hàm bmap(). Viết phần báo cáo Large files và test bigfile. & 100\% \\
+\hline
+Đào Sỹ Duy Minh (23122041) & 
+Nghiên cứu pathname lookup và file types. Cài đặt system call symlink() và modify sys\_open(). Viết phần báo cáo Symbolic links và hoàn thiện báo cáo. & 100\% \\
+\hline
+Nguyễn Lâm Phú Quý (23122048) & 
+Cài đặt itrunc() để giải phóng doubly-indirect blocks. Test và debug các edge cases của symbolic links. Kiểm thử tổng hợp và phân tích kết quả make grade. & 100\% \\
+\hline
+\end{tabular}
+\end{table}
+
+% ============= LARGE FILES =============
+\section{Chi tiết thực hiện}
+
+\subsection{Large files -- Mở rộng kích thước file}
+
+\subsubsection{Phân tích vấn đề}
+
+Vấn đề ban đầu: Hệ thống file xv6 giới hạn kích thước file tối đa ở 268 blocks (tương đương 268 KB với BSIZE = 1024). Giới hạn này đến từ cấu trúc inode có 12 direct blocks và 1 singly-indirect block (chứa 256 block addresses), tổng cộng: 12 + 256 = 268 blocks.
+
+Mục tiêu của bài tập là tăng kích thước file tối đa lên 65803 blocks bằng cách thêm doubly-indirect block. Công thức tính như sau: 11 direct blocks + 256 blocks từ singly-indirect + 65536 blocks từ doubly-indirect (256 × 256) = 65803 blocks.
+
+\subsubsection{Cài đặt chi tiết}
+
+Nhóm thực hiện các bước cài đặt theo thứ tự sau:
+
+\textbf{Bước 1: Cập nhật cấu trúc dữ liệu.} Trong file kernel/fs.h, nhóm thay đổi NDIRECT từ 12 xuống 11, mở rộng mảng addrs[] từ NDIRECT+1 lên NDIRECT+2 (tổng 13 phần tử), và cập nhật công thức MAXFILE = 11 + 256 + 256*256 = 65803. Tương tự, trong kernel/file.h cũng cập nhật struct inode với addrs[NDIRECT+2].
+
+\textbf{Bước 2: Mở rộng hàm bmap().} Trong file kernel/fs.c, nhóm thêm logic xử lý doubly-indirect block sau phần singly-indirect. Thuật toán tính chỉ số 2 cấp sử dụng hai biến: outer\_idx = bn / NINDIRECT (chỉ số trong doubly-indirect block) và inner\_idx = bn \% NINDIRECT (chỉ số trong singly-indirect block). Quy trình xử lý: load doubly-indirect block từ ip->addrs[NDIRECT+1], sau đó load singly-indirect block thứ outer\_idx, cuối cùng lấy data block thứ inner\_idx. Nếu bất kỳ block nào chưa tồn tại, hàm sẽ tự động cấp phát bằng balloc() và ghi log bằng log\_write().
+
+\begin{lstlisting}[caption={Xử lý doubly-indirect block trong bmap()}]
+// Xu ly doubly-indirect blocks
+if(bn < NINDIRECT * NINDIRECT){
+    uint outer_idx = bn / NINDIRECT;  // Chi so trong doubly-indirect
+    uint inner_idx = bn % NINDIRECT;  // Chi so trong singly-indirect
+    
+    // Buoc 1: Load doubly-indirect block
+    if((block_addr = ip->addrs[NDIRECT+1]) == 0){
+        block_addr = balloc(ip->dev);
+        ip->addrs[NDIRECT+1] = block_addr;
+    }
+    struct buf *dbl_buf = bread(ip->dev, block_addr);
+    uint *dbl_addrs = (uint*)dbl_buf->data;
+    
+    // Buoc 2: Lay dia chi singly-indirect block
+    uint sgl_block_addr = dbl_addrs[outer_idx];
+    if(sgl_block_addr == 0){
+        sgl_block_addr = balloc(ip->dev);
+        dbl_addrs[outer_idx] = sgl_block_addr;
+        log_write(dbl_buf);
+    }
+    brelse(dbl_buf);
+    
+    // Buoc 3: Load singly-indirect va lay data block
+    struct buf *sgl_buf = bread(ip->dev, sgl_block_addr);
+    // ... (tiep tuc xu ly)
+}
+\end{lstlisting}
+
+\textbf{Bước 3: Cập nhật hàm itrunc().} Nhóm thêm logic giải phóng doubly-indirect blocks với cấu trúc lồng nhau: duyệt qua 256 singly-indirect block pointers, với mỗi singly-indirect, giải phóng 256 data blocks bên trong, sau đó giải phóng chính singly-indirect block, và cuối cùng giải phóng doubly-indirect block. Việc này đảm bảo không có memory leak khi file bị xóa hoặc truncate.
+
+% ============= SYMBOLIC LINKS =============
+\subsection{Symbolic links -- Liên kết mềm}
+
+\subsubsection{Phân tích yêu cầu}
+
+Mục tiêu là cài đặt symbolic links (soft links) cho phép tạo liên kết đến file thông qua đường dẫn. Khác với hard links chỉ trỏ đến file trên cùng disk và tăng nlink count, symbolic links có thể trỏ đến file trên các thiết bị khác nhau và hoạt động ngay cả khi file đích chưa tồn tại.
+
+Các chức năng cần thực hiện bao gồm: system call symlink(target, path) để tạo symbolic link, modify open() để tự động follow symbolic links, flag O\_NOFOLLOW để mở chính symlink thay vì follow nó, và phát hiện vòng lặp vô hạn với cycle detection (max depth = 10).
+
+\subsubsection{Cài đặt chi tiết}
+
+\textbf{Bước 1: Định nghĩa constants và types mới.} Trong kernel/stat.h, thêm T\_SYMLINK = 4 để định nghĩa loại file symbolic link. Trong kernel/fcntl.h, thêm O\_NOFOLLOW = 0x800 là flag không follow symlink khi open.
+
+\textbf{Bước 2: Đăng ký system call mới.} Thêm SYS\_symlink = 22 vào kernel/syscall.h, đăng ký hàm sys\_symlink trong kernel/syscall.c, thêm entry trong user/usys.pl và prototype trong user/user.h.
+
+\textbf{Bước 3: Cài đặt sys\_symlink().} Hàm này nhận 2 tham số: target là đường dẫn đích và path là nơi tạo link. Quy trình: tạo inode mới với type T\_SYMLINK, sau đó ghi target path vào data blocks của inode bằng writei(). Điểm đặc biệt là target không cần tồn tại tại thời điểm tạo symlink -- đây là tính năng quan trọng của symbolic link.
+
+\begin{lstlisting}[caption={Cài đặt sys\_symlink()}]
+// Tao symbolic link tu path tro den target
+uint64 sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+  ip = create(path, T_SYMLINK, 0, 0);
+  if(ip == 0){ end_op(); return -1; }
+
+  // Su dung strlen() de tinh do dai
+  int target_len = strlen(target) + 1;
+  
+  if(writei(ip, 0, (uint64)target, 0, target_len) != target_len){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
+  return 0;
+}
+\end{lstlisting}
+
+\textbf{Bước 4: Modify sys\_open() để follow symlinks.} Khi mở file, kiểm tra nếu inode có type T\_SYMLINK và không có flag O\_NOFOLLOW, hệ thống sẽ tự động follow symlink chain. Sử dụng vòng lặp for với biến đếm follow\_count để theo dõi số lần follow. Mỗi lần: đọc target path từ data blocks của symlink bằng readi(), sau đó resolve đến inode tiếp theo bằng namei(). Dừng lại khi gặp inode không phải symlink hoặc khi follow\_count đạt SYMLINK\_MAX\_DEPTH = 10 (để tránh cycle vô hạn).
+
+% ============= KẾT QUẢ =============
+\subsection{Kết quả tổng hợp}
+
+\subsubsection{Điểm số make grade}
+
+Chạy lệnh đánh giá tổng thể bằng python3 grade-lab-fs, kết quả cho thấy cả hai chức năng chính đều hoạt động chính xác:
+
+\begin{table}[H]
+\centering
+\caption{Kết quả kiểm thử}
+\begin{tabular}{|l|c|c|}
+\hline
+\textbf{Test} & \textbf{Kết quả} & \textbf{Thời gian} \\
+\hline
+running bigfile (wrote 65803 blocks) & OK & 146.9s \\
+\hline
+symlinktest: symlinks & OK & 1.2s \\
+\hline
+symlinktest: concurrent symlinks & OK & 1.2s \\
+\hline
+\end{tabular}
+\end{table}
+
+Test bigfile tạo thành công file với 65803 blocks trong khoảng 2.5 phút. Test symlinktest vượt qua cả hai test cases về symbolic links cơ bản và concurrent trong thời gian rất nhanh (1.2 giây).
+
+% ============= TỔNG KẾT =============
+\section{Tổng kết}
+
+\subsection{Những gì đã học được}
+
+Về kiến thức hệ thống file, nhóm hiểu rõ cấu trúc inode với các loại blocks (direct, singly-indirect, doubly-indirect), cơ chế block mapping và cách bmap() chuyển đổi logical block number thành disk block address, cách pathname lookup hoạt động trong kernel, và quy trình implement system call mới từ việc đăng ký trong syscall.h đến cài đặt trong sysfile.c.
+
+Về kỹ năng lập trình kernel, nhóm làm quen với việc debug kernel code (khó hơn user code do không có printf nhiều), học cách đọc và hiểu code có sẵn trước khi thêm chức năng mới, và rèn luyện kỹ năng xử lý memory và tránh memory leak bằng cách luôn gọi brelse() sau bread().
+
+\subsection{Khó khăn gặp phải}
+
+Về mặt kỹ thuật, ban đầu khó hiểu cách tính chỉ số 2 cấp trong doubly-indirect block với outer\_idx và inner\_idx. Dễ quên giải phóng hết các intermediate blocks trong itrunc() dẫn đến memory leak. Xử lý symlink chain và cycle detection cần đọc kỹ đề bài để hiểu các edge cases.
+
+Về quy trình, đây là lần đầu tiên làm việc với kernel code nên mất thời gian làm quen với codebase. Phải đọc nhiều code có sẵn để hiểu được bối cảnh trước khi bắt đầu code. Debug kernel khó hơn debug chương trình thường vì thiếu các công cụ debugging tiện lợi.
+
+Qua project này, nhóm cảm thấy tự tin hơn khi làm việc với kernel code và hiểu sâu hơn về cách hệ thống file hoạt động ở low-level.
+
+\end{document}

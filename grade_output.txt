@@ -1,0 +1,20 @@
+make: 'kernel/kernel' is up to date.
+== Test running bigfile == running bigfile: OK (113.6s) 
+== Test running symlinktest == (0.5s) 
+== Test   symlinktest: symlinks == 
+  symlinktest: symlinks: OK 
+== Test   symlinktest: concurrent symlinks == 
+  symlinktest: concurrent symlinks: OK 
+== Test usertests == usertests: FAIL (2.4s) 
+    ...
+         test copyout: usertrap(): unexpected scause 0x000000000000000c pid=6
+                     sepc=0x0000000000056e0a stval=0x0000000000056e0a
+         FAILED
+         SOME TESTS FAILED
+         $ qemu-system-riscv64: terminating on signal 15 from pid 7154 (make)
+    MISSING '^ALL TESTS PASSED$'
+    QEMU output saved to xv6.out.usertests
+== Test time == 
+time: FAIL 
+    Cannot read time.txt
+Score: 80/100

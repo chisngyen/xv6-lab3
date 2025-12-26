@@ -1,0 +1,321 @@
+diff --git a/Makefile b/Makefile
+index 8e74f52..cd6fb05 100644
+--- a/Makefile
++++ b/Makefile
+@@ -244,7 +244,8 @@ endif
+ 
+ ifeq ($(LAB),fs)
+ UPROGS += \
+-	$U/_bigfile
++	$U/_bigfile\
++	$U/_symlinktest
+ endif
+ 
+ 
+diff --git a/gradelib.py b/gradelib.py
+index f0d4934..dd043c4 100644
+--- a/gradelib.py
++++ b/gradelib.py
+@@ -118,7 +118,7 @@ def run_tests():
+     parser.add_option("-v", "--verbose", action="store_true",
+                       help="print commands")
+     parser.add_option("--color", choices=["never", "always", "auto"],
+-                      default="auto", help="never, always, or auto")
++                      default="always", help="never, always, or auto")
+     parser.add_option("--results", help="results file path")
+     (options, args) = parser.parse_args()
+ 
+@@ -238,7 +238,7 @@ def make(*target):
+     post_make()
+ 
+ def show_command(cmd):
+-    from pipes import quote
++    from shlex import quote
+     print("\n$", " ".join(map(quote, cmd)))
+ 
+ def maybe_unlink(*paths):
+diff --git a/kernel/fcntl.h b/kernel/fcntl.h
+index 44861b9..e5e38e3 100644
+--- a/kernel/fcntl.h
++++ b/kernel/fcntl.h
+@@ -3,3 +3,4 @@
+ #define O_RDWR    0x002
+ #define O_CREATE  0x200
+ #define O_TRUNC   0x400
++#define O_NOFOLLOW 0x800
+diff --git a/kernel/file.h b/kernel/file.h
+index b076d1d..5c4eb3a 100644
+--- a/kernel/file.h
++++ b/kernel/file.h
+@@ -26,7 +26,7 @@ struct inode {
+   short minor;
+   short nlink;
+   uint size;
+-  uint addrs[NDIRECT+1];
++  uint addrs[NDIRECT+2];
+ };
+ 
+ // map major device number to device functions.
+diff --git a/kernel/fs.c b/kernel/fs.c
+index c6bab15..6e8c51e 100644
+--- a/kernel/fs.c
++++ b/kernel/fs.c
+@@ -375,6 +375,7 @@ iunlockput(struct inode *ip)
+ // in blocks on the disk. The first NDIRECT block numbers
+ // are listed in ip->addrs[].  The next NINDIRECT blocks are
+ // listed in block ip->addrs[NDIRECT].
++// The doubly-indirect block is at ip->addrs[NDIRECT+1].
+ 
+ // Return the disk block address of the nth block in inode ip.
+ // If there is no such block, bmap allocates one.
+@@ -416,6 +417,46 @@ bmap(struct inode *ip, uint bn)
+     brelse(bp);
+     return addr;
+   }
++  bn -= NINDIRECT;
++
++  if(bn < NINDIRECT * NINDIRECT){
++    // Load doubly-indirect block, allocating if necessary.
++    if((addr = ip->addrs[NDIRECT+1]) == 0){
++      addr = balloc(ip->dev);
++      if(addr == 0)
++        return 0;
++      ip->addrs[NDIRECT+1] = addr;
++    }
++    bp = bread(ip->dev, addr);
++    a = (uint*)bp->data;
++    
++    // Get the singly-indirect block index
++    uint idx1 = bn / NINDIRECT;
++    if((addr = a[idx1]) == 0){
++      addr = balloc(ip->dev);
++      if(addr == 0){
++        brelse(bp);
++        return 0;
++      }
++      a[idx1] = addr;
++      log_write(bp);
++    }
++    brelse(bp);
++    
++    // Load the singly-indirect block
++    bp = bread(ip->dev, addr);
++    a = (uint*)bp->data;
++    uint idx2 = bn % NINDIRECT;
++    if((addr = a[idx2]) == 0){
++      addr = balloc(ip->dev);
++      if(addr){
++        a[idx2] = addr;
++        log_write(bp);
++      }
++    }
++    brelse(bp);
++    return addr;
++  }
+ 
+   panic("bmap: out of range");
+ }
+@@ -448,6 +489,30 @@ itrunc(struct inode *ip)
+     ip->addrs[NDIRECT] = 0;
+   }
+ 
++  if(ip->addrs[NDIRECT+1]){
++    // Free doubly-indirect block
++    struct buf *bp2;
++    uint *a2;
++    bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
++    a = (uint*)bp->data;
++    for(j = 0; j < NINDIRECT; j++){
++      if(a[j]){
++        // Free each singly-indirect block
++        bp2 = bread(ip->dev, a[j]);
++        a2 = (uint*)bp2->data;
++        for(int k = 0; k < NINDIRECT; k++){
++          if(a2[k])
++            bfree(ip->dev, a2[k]);
++        }
++        brelse(bp2);
++        bfree(ip->dev, a[j]);
++      }
++    }
++    brelse(bp);
++    bfree(ip->dev, ip->addrs[NDIRECT+1]);
++    ip->addrs[NDIRECT+1] = 0;
++  }
++
+   ip->size = 0;
+   iupdate(ip);
+ }
+diff --git a/kernel/fs.h b/kernel/fs.h
+index 139dcc9..78c109d 100644
+--- a/kernel/fs.h
++++ b/kernel/fs.h
+@@ -24,9 +24,9 @@ struct superblock {
+ 
+ #define FSMAGIC 0x10203040
+ 
+-#define NDIRECT 12
++#define NDIRECT 11
+ #define NINDIRECT (BSIZE / sizeof(uint))
+-#define MAXFILE (NDIRECT + NINDIRECT)
++#define MAXFILE (NDIRECT + NINDIRECT + NINDIRECT * NINDIRECT)
+ 
+ // On-disk inode structure
+ struct dinode {
+@@ -35,7 +35,7 @@ struct dinode {
+   short minor;          // Minor device number (T_DEVICE only)
+   short nlink;          // Number of links to inode in file system
+   uint size;            // Size of file (bytes)
+-  uint addrs[NDIRECT+1];   // Data block addresses
++  uint addrs[NDIRECT+2];   // Data block addresses
+ };
+ 
+ // Inodes per block.
+diff --git a/kernel/stat.h b/kernel/stat.h
+index 19543af..9554d30 100644
+--- a/kernel/stat.h
++++ b/kernel/stat.h
+@@ -1,6 +1,7 @@
+ #define T_DIR     1   // Directory
+ #define T_FILE    2   // File
+ #define T_DEVICE  3   // Device
++#define T_SYMLINK 4   // Symbolic link
+ 
+ struct stat {
+   int dev;     // File system's disk device
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index ed65409..52233e8 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -101,6 +101,7 @@ extern uint64 sys_unlink(void);
+ extern uint64 sys_link(void);
+ extern uint64 sys_mkdir(void);
+ extern uint64 sys_close(void);
++extern uint64 sys_symlink(void);
+ 
+ // An array mapping syscall numbers from syscall.h
+ // to the function that handles the system call.
+@@ -126,6 +127,7 @@ static uint64 (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_symlink] sys_symlink,
+ };
+ 
+ void
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index bc5f356..13818da 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -20,3 +20,4 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_symlink 22
+diff --git a/kernel/sysfile.c b/kernel/sysfile.c
+index 16b668c..3529c73 100644
+--- a/kernel/sysfile.c
++++ b/kernel/sysfile.c
+@@ -301,6 +301,42 @@ create(char *path, short type, short major, short minor)
+   return 0;
+ }
+ 
++// Create a symbolic link from path to target
++uint64
++sys_symlink(void)
++{
++  char target[MAXPATH], path[MAXPATH];
++  struct inode *ip;
++  int len;
++
++  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
++    return -1;
++
++  begin_op();
++  
++  // Create a new inode with type T_SYMLINK
++  if((ip = create(path, T_SYMLINK, 0, 0)) == 0){
++    end_op();
++    return -1;
++  }
++
++  // Calculate length of target including null terminator
++  for(len = 0; len < MAXPATH && target[len]; len++)
++    ;
++  len++; // include null terminator
++  
++  // Write the target path to the inode's data blocks
++  if(writei(ip, 0, (uint64)target, 0, len) != len){
++    iunlockput(ip);
++    end_op();
++    return -1;
++  }
++
++  iunlockput(ip);
++  end_op();
++  return 0;
++}
++
+ uint64
+ sys_open(void)
+ {
+@@ -328,6 +364,38 @@ sys_open(void)
+       return -1;
+     }
+     ilock(ip);
++    
++    // Follow symbolic links unless O_NOFOLLOW is set
++    if(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
++      // Follow the symlink chain with a depth limit
++      int depth = 0;
++      while(ip->type == T_SYMLINK && depth < 10){
++        char target[MAXPATH];
++        int len = readi(ip, 0, (uint64)target, 0, MAXPATH - 1);
++        if(len <= 0){
++          iunlockput(ip);
++          end_op();
++          return -1;
++        }
++        target[len] = 0; // Ensure null termination just in case
++        iunlockput(ip);
++        
++        if((ip = namei(target)) == 0){
++          end_op();
++          return -1;
++        }
++        ilock(ip);
++        depth++;
++      }
++      
++      // Check if we hit the depth limit (cycle detection)
++      if(depth >= 10){
++        iunlockput(ip);
++        end_op();
++        return -1;
++      }
++    }
++    
+     if(ip->type == T_DIR && omode != O_RDONLY){
+       iunlockput(ip);
+       end_op();
+diff --git a/user/user.h b/user/user.h
+index 4d398d5..23060fd 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -22,6 +22,7 @@ int getpid(void);
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int symlink(const char*, const char*);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/user/usys.pl b/user/usys.pl
+index 01e426e..bc5c22e 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -36,3 +36,4 @@ entry("getpid");
+ entry("sbrk");
+ entry("sleep");
+ entry("uptime");
++entry("symlink");
